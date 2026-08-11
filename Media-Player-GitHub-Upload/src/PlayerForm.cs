@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -55,6 +56,7 @@ namespace LumaPlayer
         private PlayerIconButton recordButton;
         private SpeedSlider speedSlider;
         private VolumeSlider volumeSlider;
+        private TimelinePreviewForm timelinePreview;
 
         private IntPtr mpv;
         private string currentFile;
@@ -132,6 +134,8 @@ namespace LumaPlayer
             timeline.Width = 1088;
             timeline.SeekRequested += delegate(double seconds) { SeekAbsolute(seconds); };
             timeline.NudgeRequested += PauseAndNudgeTimeline;
+            timeline.HoverRequested += ShowTimelinePreview;
+            timeline.HoverEnded += HideTimelinePreview;
             toolTip.SetToolTip(timeline, "Mouse wheel: pause and move 0.1 second forward/backward");
 
             timeLabel = new Label();
@@ -224,7 +228,6 @@ namespace LumaPlayer
             Controls.Add(videoPanel);
             Controls.Add(controlsPanel);
 
-            RegisterVolumeWheel(this);
             ResumeLayout(true);
         }
 
@@ -368,6 +371,18 @@ namespace LumaPlayer
             BuildFolderQueueAsync(currentFile, generation);
         }
 
+        internal void OpenExternalFile(string path)
+        {
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Show();
+            BringToFront();
+            Activate();
+            try { NativeMethods.SetForegroundWindow(Handle); }
+            catch { }
+            if (!String.IsNullOrWhiteSpace(path) && File.Exists(path))
+                LoadVideo(Path.GetFullPath(path));
+        }
+
         private void BuildFolderQueueAsync(string selectedFile, int generation)
         {
             ThreadPool.QueueUserWorkItem(delegate
@@ -486,6 +501,21 @@ namespace LumaPlayer
             SeekRelative(seconds);
         }
 
+        private void ShowTimelinePreview(double seconds, int mouseX)
+        {
+            if (String.IsNullOrEmpty(currentFile) || IsAudioFile(currentFile)) return;
+            if (timelinePreview == null || timelinePreview.IsDisposed)
+                timelinePreview = new TimelinePreviewForm();
+            Point anchor = timeline.PointToScreen(new Point(mouseX, 0));
+            timelinePreview.ShowPreview(this, currentFile, seconds, anchor);
+        }
+
+        private void HideTimelinePreview()
+        {
+            if (timelinePreview != null && !timelinePreview.IsDisposed)
+                timelinePreview.HidePreview();
+        }
+
         private void AdjustVolume(double delta)
         {
             if (mpv == IntPtr.Zero) return;
@@ -518,7 +548,7 @@ namespace LumaPlayer
             string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Luma Player", "Screenshots");
             Directory.CreateDirectory(folder);
             string path = Path.Combine(folder, "Luma_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".png");
-            int result = MpvNative.Command(mpv, "screenshot-to-file", path, "window");
+            int result = MpvNative.Command(mpv, "screenshot-to-file", path, "video");
             ShowStatus(result >= 0 ? "Screenshot saved: " + path : "Screenshot could not be saved", 4.0);
         }
 
@@ -627,14 +657,36 @@ namespace LumaPlayer
 
         private void OpenVideoDialog()
         {
+            bool forceNewWindow = (ModifierKeys & Keys.Control) == Keys.Control;
+            OpenVideoDialog(forceNewWindow);
+        }
+
+        private void OpenVideoDialog(bool forceNewWindow)
+        {
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Title = "Open media";
                 dialog.Filter = "Media files|*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.ts;*.mts;*.m2ts;*.mpg;*.mpeg;*.vob;*.ogv;*.3gp;*.mp3;*.wav;*.flac;*.m4a;*.aac;*.ogg;*.opus;*.wma;*.aiff;*.aif;*.alac;*.ape;*.ac3;*.dts|Video files|*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.ts;*.mts;*.m2ts;*.mpg;*.mpeg;*.vob;*.ogv;*.3gp|Audio files|*.mp3;*.wav;*.flac;*.m4a;*.aac;*.ogg;*.opus;*.wma;*.aiff;*.aif;*.alac;*.ape;*.ac3;*.dts|All files|*.*";
                 dialog.Multiselect = false;
                 if (dialog.ShowDialog(this) == DialogResult.OK)
-                    LoadVideo(dialog.FileName);
+                {
+                    if (forceNewWindow) StartNewPlayerWindow(dialog.FileName);
+                    else LoadVideo(dialog.FileName);
+                }
             }
+        }
+
+        private static void StartNewPlayerWindow(string path)
+        {
+            try
+            {
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = Application.ExecutablePath;
+                start.Arguments = "--new-window \"" + path + "\"";
+                start.UseShellExecute = true;
+                Process.Start(start);
+            }
+            catch { }
         }
 
         private void OnDragEnter(object sender, DragEventArgs e)
@@ -657,19 +709,6 @@ namespace LumaPlayer
             }
         }
 
-        private void RegisterVolumeWheel(Control root)
-        {
-            if (!(root is TimelineBar))
-            {
-                root.MouseWheel += delegate(object sender, MouseEventArgs e)
-                {
-                    if (e.Delta != 0) AdjustVolume((e.Delta / 120.0) * 2.0);
-                };
-            }
-            foreach (Control child in root.Controls)
-                RegisterVolumeWheel(child);
-        }
-
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
             if (HandleShortcutKey(e.KeyCode, e.Control))
@@ -681,7 +720,8 @@ namespace LumaPlayer
 
         private bool HandleShortcutKey(Keys key, bool control)
         {
-            if (key == Keys.Space) TogglePause();
+            if (key == Keys.O && control) OpenVideoDialog(true);
+            else if (key == Keys.Space) TogglePause();
             else if (key == Keys.F || key == Keys.F11) ToggleFullscreen();
             else if (key == Keys.Escape)
             {
@@ -854,6 +894,10 @@ namespace LumaPlayer
                     lParam, typeof(NativeMethods.MouseHookData));
                 Point pointer = new Point(data.point.x, data.point.y);
                 int message = wParam.ToInt32();
+                Rectangle formBounds = RectangleToScreen(ClientRectangle);
+
+                if (!formBounds.Contains(pointer))
+                    return NativeMethods.CallNextHookEx(mouseHook, code, wParam, lParam);
 
                 if (fullscreen && message == WM_MOUSEMOVE)
                 {
@@ -866,7 +910,24 @@ namespace LumaPlayer
                     }
                 }
 
-                if (fullscreen && controlsPanel.Visible)
+                if (message == WM_MOUSEWHEEL)
+                {
+                    int delta = (short)((data.mouseData >> 16) & 0xffff);
+                    double steps = delta / 120.0;
+                    if (controlsPanel.Visible && timeline.Visible)
+                    {
+                        Rectangle timelineBounds = timeline.RectangleToScreen(timeline.ClientRectangle);
+                        if (timelineBounds.Contains(pointer))
+                        {
+                            BeginInvoke(new Action(delegate { PauseAndNudgeTimeline(steps * 0.1); }));
+                            return new IntPtr(1);
+                        }
+                    }
+                    BeginInvoke(new Action(delegate { AdjustVolume(steps * 2.0); }));
+                    return new IntPtr(1);
+                }
+
+                if (controlsPanel.Visible)
                 {
                     Rectangle controlsBounds = controlsPanel.RectangleToScreen(controlsPanel.ClientRectangle);
                     if (controlsBounds.Contains(pointer))
@@ -885,12 +946,6 @@ namespace LumaPlayer
                     if (message == WM_RBUTTONUP)
                     {
                         BeginInvoke(new Action(ShowVideoContextMenu));
-                        return new IntPtr(1);
-                    }
-                    if (message == WM_MOUSEWHEEL)
-                    {
-                        int delta = (short)((data.mouseData >> 16) & 0xffff);
-                        BeginInvoke(new Action(delegate { AdjustVolume((delta / 120.0) * 2.0); }));
                         return new IntPtr(1);
                     }
                 }
@@ -937,6 +992,11 @@ namespace LumaPlayer
             uiTimer.Stop();
             StopRecording(false);
             RemoveInputHooks();
+            if (timelinePreview != null && !timelinePreview.IsDisposed)
+            {
+                timelinePreview.Close();
+                timelinePreview = null;
+            }
 
             if (mpv != IntPtr.Zero)
             {
@@ -1005,6 +1065,10 @@ namespace LumaPlayer
             internal static extern IntPtr GetForegroundWindow();
 
             [DllImport("user32.dll")]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            internal static extern bool SetForegroundWindow(IntPtr window);
+
+            [DllImport("user32.dll")]
             internal static extern short GetAsyncKeyState(int virtualKey);
 
             [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
@@ -1015,6 +1079,191 @@ namespace LumaPlayer
 
             [DllImport("dwmapi.dll")]
             internal static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+        }
+
+        private sealed class TimelinePreviewForm : Form
+        {
+            private readonly Panel previewSurface;
+            private readonly Label previewTime;
+            private readonly System.Windows.Forms.Timer seekTimer;
+            private readonly System.Windows.Forms.Timer idleTimer;
+            private IntPtr previewMpv;
+            private string loadedFile;
+            private double pendingSeconds;
+            private int seekAttempts;
+
+            internal TimelinePreviewForm()
+            {
+                FormBorderStyle = FormBorderStyle.None;
+                ShowInTaskbar = false;
+                StartPosition = FormStartPosition.Manual;
+                TopMost = true;
+                BackColor = Color.FromArgb(31, 37, 48);
+                Padding = new Padding(1);
+                ClientSize = new Size(240, 160);
+
+                previewTime = new Label();
+                previewTime.Dock = DockStyle.Bottom;
+                previewTime.Height = 25;
+                previewTime.TextAlign = ContentAlignment.MiddleCenter;
+                previewTime.Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold, GraphicsUnit.Point);
+                previewTime.ForeColor = Color.White;
+                previewTime.BackColor = Color.FromArgb(31, 37, 48);
+
+                previewSurface = new Panel();
+                previewSurface.Dock = DockStyle.Fill;
+                previewSurface.BackColor = Color.Black;
+
+                Controls.Add(previewSurface);
+                Controls.Add(previewTime);
+
+                seekTimer = new System.Windows.Forms.Timer();
+                seekTimer.Interval = 70;
+                seekTimer.Tick += ApplyPendingSeek;
+
+                idleTimer = new System.Windows.Forms.Timer();
+                idleTimer.Interval = 5000;
+                idleTimer.Tick += delegate
+                {
+                    idleTimer.Stop();
+                    DisposePreviewEngine();
+                };
+            }
+
+            protected override bool ShowWithoutActivation
+            {
+                get { return true; }
+            }
+
+            protected override CreateParams CreateParams
+            {
+                get
+                {
+                    const int WS_EX_TOOLWINDOW = 0x00000080;
+                    const int WS_EX_NOACTIVATE = 0x08000000;
+                    CreateParams parameters = base.CreateParams;
+                    parameters.ExStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                    return parameters;
+                }
+            }
+
+            internal void ShowPreview(Form owner, string file, double seconds, Point anchor)
+            {
+                if (String.IsNullOrEmpty(file) || !File.Exists(file)) return;
+                pendingSeconds = Math.Max(0.0, seconds);
+                seekAttempts = 0;
+                previewTime.Text = FormatTime(pendingSeconds);
+
+                Rectangle working = Screen.FromPoint(anchor).WorkingArea;
+                int x = Math.Max(working.Left + 4, Math.Min(working.Right - Width - 4, anchor.X - Width / 2));
+                int y = anchor.Y - Height - 9;
+                if (y < working.Top + 4) y = anchor.Y + 29;
+                Location = new Point(x, Math.Min(working.Bottom - Height - 4, y));
+
+                if (!Visible) Show(owner);
+                BringToFront();
+                idleTimer.Stop();
+
+                if (!EnsurePreviewEngine()) return;
+                if (!String.Equals(loadedFile, file, StringComparison.OrdinalIgnoreCase))
+                {
+                    loadedFile = file;
+                    MpvNative.Command(previewMpv, "loadfile", file, "replace");
+                    seekTimer.Interval = 180;
+                }
+                else
+                {
+                    seekTimer.Interval = 70;
+                }
+
+                seekTimer.Stop();
+                seekTimer.Start();
+            }
+
+            internal void HidePreview()
+            {
+                seekTimer.Stop();
+                if (Visible) Hide();
+                idleTimer.Stop();
+                idleTimer.Start();
+            }
+
+            private bool EnsurePreviewEngine()
+            {
+                if (previewMpv != IntPtr.Zero) return true;
+                try
+                {
+                    previewSurface.CreateControl();
+                    previewMpv = MpvNative.mpv_create();
+                    if (previewMpv == IntPtr.Zero) return false;
+
+                    MpvNative.mpv_set_option_string(previewMpv, "terminal", "no");
+                    MpvNative.mpv_set_option_string(previewMpv, "msg-level", "all=no");
+                    MpvNative.mpv_set_option_string(previewMpv, "osc", "no");
+                    MpvNative.mpv_set_option_string(previewMpv, "audio", "no");
+                    MpvNative.mpv_set_option_string(previewMpv, "pause", "yes");
+                    MpvNative.mpv_set_option_string(previewMpv, "idle", "yes");
+                    MpvNative.mpv_set_option_string(previewMpv, "keep-open", "yes");
+                    MpvNative.mpv_set_option_string(previewMpv, "hwdec", "auto-safe");
+                    MpvNative.mpv_set_option_string(previewMpv, "vo", "gpu");
+                    MpvNative.mpv_set_option_string(previewMpv, "gpu-api", "d3d11");
+                    MpvNative.mpv_set_option_string(previewMpv, "hr-seek", "yes");
+                    MpvNative.mpv_set_option_string(previewMpv, "hr-seek-framedrop", "no");
+                    MpvNative.mpv_set_option_string(previewMpv, "osd-level", "0");
+
+                    long windowId = previewSurface.Handle.ToInt64();
+                    MpvNative.mpv_set_option(previewMpv, "wid", MpvNative.MPV_FORMAT_INT64, ref windowId);
+                    if (MpvNative.mpv_initialize(previewMpv) < 0)
+                    {
+                        DisposePreviewEngine();
+                        return false;
+                    }
+                    return true;
+                }
+                catch
+                {
+                    DisposePreviewEngine();
+                    return false;
+                }
+            }
+
+            private void ApplyPendingSeek(object sender, EventArgs e)
+            {
+                seekTimer.Stop();
+                if (previewMpv == IntPtr.Zero) return;
+                double duration;
+                if (MpvNative.mpv_get_property_double(previewMpv, "duration", MpvNative.MPV_FORMAT_DOUBLE, out duration) < 0)
+                {
+                    seekAttempts++;
+                    if (seekAttempts < 20 && Visible)
+                    {
+                        seekTimer.Interval = 100;
+                        seekTimer.Start();
+                    }
+                    return;
+                }
+                pendingSeconds = Math.Max(0.0, Math.Min(duration, pendingSeconds));
+                MpvNative.Command(previewMpv, "set", "pause", "yes");
+                MpvNative.Command(previewMpv, "seek", pendingSeconds.ToString("0.000", CultureInfo.InvariantCulture), "absolute+exact");
+            }
+
+            private void DisposePreviewEngine()
+            {
+                seekTimer.Stop();
+                loadedFile = null;
+                if (previewMpv == IntPtr.Zero) return;
+                try { MpvNative.mpv_terminate_destroy(previewMpv); }
+                catch { }
+                previewMpv = IntPtr.Zero;
+            }
+
+            protected override void OnFormClosed(FormClosedEventArgs e)
+            {
+                idleTimer.Stop();
+                seekTimer.Stop();
+                DisposePreviewEngine();
+                base.OnFormClosed(e);
+            }
         }
 
         private enum PlayerIcon

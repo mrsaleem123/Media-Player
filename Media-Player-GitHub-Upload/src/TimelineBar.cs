@@ -13,6 +13,8 @@ namespace LumaPlayer
 
         internal event Action<double> SeekRequested;
         internal event Action<double> NudgeRequested;
+        internal event Action<double, int> HoverRequested;
+        internal event Action HoverEnded;
 
         internal TimelineBar()
         {
@@ -84,8 +86,16 @@ namespace LumaPlayer
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (duration > 0.0 && HoverRequested != null)
+                HoverRequested(TimeAt(e.X), Math.Max(8, Math.Min(Width - 8, e.X)));
             if (dragging)
                 UpdateFromMouse(e.X, false);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (HoverEnded != null) HoverEnded();
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -102,6 +112,8 @@ namespace LumaPlayer
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
+            HandledMouseEventArgs handled = e as HandledMouseEventArgs;
+            if (handled != null) handled.Handled = true;
             double steps = e.Delta / 120.0;
             if (Math.Abs(steps) > 0.001 && NudgeRequested != null)
                 NudgeRequested(steps * 0.1);
@@ -110,12 +122,17 @@ namespace LumaPlayer
         private void UpdateFromMouse(int mouseX, bool notify)
         {
             if (duration <= 0.0) return;
-            double ratio = (mouseX - 8.0) / Math.Max(1.0, Width - 16.0);
-            ratio = Math.Max(0.0, Math.Min(1.0, ratio));
-            position = duration * ratio;
+            position = TimeAt(mouseX);
             Invalidate();
             if (notify && SeekRequested != null)
                 SeekRequested(position);
+        }
+
+        private double TimeAt(int mouseX)
+        {
+            double ratio = (mouseX - 8.0) / Math.Max(1.0, Width - 16.0);
+            ratio = Math.Max(0.0, Math.Min(1.0, ratio));
+            return duration * ratio;
         }
 
         private static GraphicsPath RoundedRectangle(RectangleF rectangle, float radius)
