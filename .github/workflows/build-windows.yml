@@ -1,0 +1,63 @@
+name: Build Windows Offline Installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build player and bundle libmpv
+        shell: pwsh
+        run: ./Media-Player-GitHub-Upload/build/Build-Windows.ps1 -Version 0.6.0
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler is unavailable."
+          }
+
+      - name: Create offline installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=0.6.0" "Media-Player-GitHub-Upload\installer\LumaPlayer.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed."
+          }
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          $setup = Get-Item "Media-Player-GitHub-Upload\InstallerOutput\LumaPlayer-Offline-Setup-v0.6.0.exe"
+          if ($setup.Length -lt 5MB) {
+            throw "Installer is too small."
+          }
+          $bytes = [IO.File]::ReadAllBytes($setup.FullName)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Installer is not a Windows executable."
+          }
+          Get-FileHash -Algorithm SHA256 $setup.FullName
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumaPlayer-Windows-Offline-v0.6.0
+          path: Media-Player-GitHub-Upload/InstallerOutput/LumaPlayer-Offline-Setup-v0.6.0.exe
+          if-no-files-found: error
+          retention-days: 30
