@@ -1,0 +1,31 @@
+LUMA PLAYER - ONE-TIME GITHUB UPLOAD
+====================================
+
+Repository:
+https://github.com/mrsaleem123/Media-Player
+
+1. Extract Media-Player-GitHub-Upload.zip.
+2. Open the repository link above in Chrome or Edge.
+3. Click "Add file" > "Upload files".
+4. Open the extracted Media-Player-GitHub-Upload folder, select ALL of its
+   contents (including the .github folder), and drag them onto GitHub.
+5. At the bottom, click "Commit changes".
+
+The Windows build will start automatically. Open the repository's "Actions"
+tab and select "Build Windows Offline Installer". When the green check mark
+appears, download the "LumaPlayer-Windows-Offline-v0.6.0" artifact.
+
+The artifact ZIP contains:
+LumaPlayer-Offline-Setup-v0.6.0.exe
+
+This is a true offline installer. It already contains the compiled player and
+the x64 mpv playback engine. Installation does not compile or download the
+player.
+
+IMPORTANT:
+- Upload the extracted CONTENTS, not Media-Player-GitHub-Upload.zip itself.
+- Windows may show a SmartScreen warning because this personal build is not
+  digitally code-signed. Use "More info" > "Run anyway" only for the installer
+  produced by your own GitHub repository.
+- Windows 11 controls default-app selection. After setup, choose Luma Player in
+  the Default apps page that opens.
