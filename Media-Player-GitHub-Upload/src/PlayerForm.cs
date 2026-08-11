@@ -59,6 +59,7 @@ namespace LumaPlayer
         private TimelinePreviewForm timelinePreview;
 
         private IntPtr mpv;
+        private bool reversePlayback;
         private string currentFile;
         private int currentIndex = -1;
         private bool recording;
@@ -180,10 +181,10 @@ namespace LumaPlayer
             toolTip.SetToolTip(recordButton, "Start / stop video recording");
 
             speedSlider = new SpeedSlider();
-            speedSlider.Size = new Size(146, 36);
+            speedSlider.Size = new Size(166, 36);
             speedSlider.Value = 1.0;
             speedSlider.ValueChanged += OnSpeedChanged;
-            toolTip.SetToolTip(speedSlider, "Drag to change playback speed; double-click resets to 1.00x");
+            toolTip.SetToolTip(speedSlider, "-4.0x reverse to +8.0x forward; 0 pauses; double-click resets to +1.0x");
 
             volumeSlider = new VolumeSlider();
             volumeSlider.Size = new Size(170, 36);
@@ -322,8 +323,12 @@ namespace LumaPlayer
                 MpvNative.mpv_set_option_string(mpv, "gpu-api", "d3d11");
                 MpvNative.mpv_set_option_string(mpv, "keep-open", "yes");
                 MpvNative.mpv_set_option_string(mpv, "autoload-files", "no");
-                MpvNative.mpv_set_option_string(mpv, "demuxer-max-bytes", "32MiB");
-                MpvNative.mpv_set_option_string(mpv, "demuxer-max-back-bytes", "8MiB");
+                MpvNative.mpv_set_option_string(mpv, "cache", "yes");
+                MpvNative.mpv_set_option_string(mpv, "demuxer-max-bytes", "128MiB");
+                MpvNative.mpv_set_option_string(mpv, "demuxer-max-back-bytes", "64MiB");
+                MpvNative.mpv_set_option_string(mpv, "video-reversal-buffer", "128MiB");
+                MpvNative.mpv_set_option_string(mpv, "audio-reversal-buffer", "8MiB");
+                MpvNative.mpv_set_option_string(mpv, "vd-queue-enable", "yes");
                 MpvNative.mpv_set_option_string(mpv, "sub-ass-override", "no");
                 MpvNative.mpv_set_option_string(mpv, "volume-max", "200");
                 MpvNative.mpv_set_option_string(mpv, "volume", "70");
@@ -366,6 +371,7 @@ namespace LumaPlayer
             timeline.Position = 0.0;
 
             MpvNative.Command(mpv, "loadfile", currentFile, "replace");
+            PrepareTimelinePreview(currentFile);
             statusLabel.Text = "Loading with hardware acceleration…";
             Text = Path.GetFileName(currentFile);
             BuildFolderQueueAsync(currentFile, generation);
@@ -470,6 +476,11 @@ namespace LumaPlayer
         private void TogglePause()
         {
             if (mpv == IntPtr.Zero || String.IsNullOrEmpty(currentFile)) return;
+            if (Math.Abs(speedSlider.Value) < 0.001)
+            {
+                speedSlider.Value = 1.0;
+                return;
+            }
             MpvNative.Command(mpv, "cycle", "pause");
         }
 
@@ -510,6 +521,18 @@ namespace LumaPlayer
             timelinePreview.ShowPreview(this, currentFile, seconds, anchor);
         }
 
+        private void PrepareTimelinePreview(string file)
+        {
+            if (String.IsNullOrEmpty(file) || IsAudioFile(file))
+            {
+                HideTimelinePreview();
+                return;
+            }
+            if (timelinePreview == null || timelinePreview.IsDisposed)
+                timelinePreview = new TimelinePreviewForm();
+            timelinePreview.Prepare(file);
+        }
+
         private void HideTimelinePreview()
         {
             if (timelinePreview != null && !timelinePreview.IsDisposed)
@@ -524,10 +547,30 @@ namespace LumaPlayer
             MpvNative.Command(mpv, "set", "volume", currentVolume.ToString("0.0", CultureInfo.InvariantCulture));
         }
 
+        private void AdjustSpeed(double delta)
+        {
+            speedSlider.Value += delta;
+        }
+
         private void OnSpeedChanged(object sender, EventArgs e)
         {
             if (mpv == IntPtr.Zero) return;
-            MpvNative.Command(mpv, "set", "speed", speedSlider.Value.ToString("0.00", CultureInfo.InvariantCulture));
+            double requested = speedSlider.Value;
+            if (Math.Abs(requested) < 0.001)
+            {
+                MpvNative.Command(mpv, "set", "pause", "yes");
+                return;
+            }
+
+            bool reverse = requested < 0.0;
+            if (reverse != reversePlayback)
+            {
+                reversePlayback = reverse;
+                MpvNative.Command(mpv, "set", "play-direction", reverse ? "backward" : "forward");
+                MpvNative.Command(mpv, "set", "hwdec", reverse ? "no" : "auto");
+            }
+            MpvNative.Command(mpv, "set", "speed", Math.Abs(requested).ToString("0.0", CultureInfo.InvariantCulture));
+            MpvNative.Command(mpv, "set", "pause", "no");
         }
 
         private void OnVolumeChanged(object sender, EventArgs e)
@@ -851,8 +894,8 @@ namespace LumaPlayer
             record.Click += delegate { ToggleRecording(); };
 
             ToolStripMenuItem speed = new ToolStripMenuItem("Playback speed");
-            string[] labels = new string[] { "0.25×", "0.50×", "0.75×", "1.00×", "1.25×", "1.50×", "2.00×", "3.00×", "4.00×" };
-            double[] values = new double[] { 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00, 4.00 };
+            string[] labels = new string[] { "-4.0×", "-2.0×", "-1.0×", "0 (Pause)", "+0.5×", "+1.0×", "+2.0×", "+4.0×", "+8.0×" };
+            double[] values = new double[] { -4.0, -2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 4.0, 8.0 };
             for (int i = 0; i < labels.Length; i++)
             {
                 int captured = i;
@@ -914,12 +957,21 @@ namespace LumaPlayer
                 {
                     int delta = (short)((data.mouseData >> 16) & 0xffff);
                     double steps = delta / 120.0;
-                    if (controlsPanel.Visible && timeline.Visible)
+                    if (controlsPanel.Visible)
                     {
-                        Rectangle timelineBounds = timeline.RectangleToScreen(timeline.ClientRectangle);
-                        if (timelineBounds.Contains(pointer))
+                        if (timeline.Visible && timeline.RectangleToScreen(timeline.ClientRectangle).Contains(pointer))
                         {
                             BeginInvoke(new Action(delegate { PauseAndNudgeTimeline(steps * 0.1); }));
+                            return new IntPtr(1);
+                        }
+                        if (speedSlider.Visible && speedSlider.RectangleToScreen(speedSlider.ClientRectangle).Contains(pointer))
+                        {
+                            BeginInvoke(new Action(delegate { AdjustSpeed(steps * 0.1); }));
+                            return new IntPtr(1);
+                        }
+                        if (volumeSlider.Visible && volumeSlider.RectangleToScreen(volumeSlider.ClientRectangle).Contains(pointer))
+                        {
+                            BeginInvoke(new Action(delegate { AdjustVolume(steps * 2.0); }));
                             return new IntPtr(1);
                         }
                     }
@@ -1086,7 +1138,6 @@ namespace LumaPlayer
             private readonly Panel previewSurface;
             private readonly Label previewTime;
             private readonly System.Windows.Forms.Timer seekTimer;
-            private readonly System.Windows.Forms.Timer idleTimer;
             private IntPtr previewMpv;
             private string loadedFile;
             private double pendingSeconds;
@@ -1118,16 +1169,8 @@ namespace LumaPlayer
                 Controls.Add(previewTime);
 
                 seekTimer = new System.Windows.Forms.Timer();
-                seekTimer.Interval = 70;
+                seekTimer.Interval = 12;
                 seekTimer.Tick += ApplyPendingSeek;
-
-                idleTimer = new System.Windows.Forms.Timer();
-                idleTimer.Interval = 5000;
-                idleTimer.Tick += delegate
-                {
-                    idleTimer.Stop();
-                    DisposePreviewEngine();
-                };
             }
 
             protected override bool ShowWithoutActivation
@@ -1162,30 +1205,29 @@ namespace LumaPlayer
 
                 if (!Visible) Show(owner);
                 BringToFront();
-                idleTimer.Stop();
 
-                if (!EnsurePreviewEngine()) return;
-                if (!String.Equals(loadedFile, file, StringComparison.OrdinalIgnoreCase))
-                {
-                    loadedFile = file;
-                    MpvNative.Command(previewMpv, "loadfile", file, "replace");
-                    seekTimer.Interval = 180;
-                }
-                else
-                {
-                    seekTimer.Interval = 70;
-                }
+                bool changed = Prepare(file);
+                seekTimer.Interval = changed ? 25 : 12;
 
                 seekTimer.Stop();
                 seekTimer.Start();
+            }
+
+            internal bool Prepare(string file)
+            {
+                if (String.IsNullOrEmpty(file) || !File.Exists(file)) return false;
+                if (!EnsurePreviewEngine()) return false;
+                if (String.Equals(loadedFile, file, StringComparison.OrdinalIgnoreCase)) return false;
+                loadedFile = file;
+                seekAttempts = 0;
+                MpvNative.Command(previewMpv, "loadfile", file, "replace");
+                return true;
             }
 
             internal void HidePreview()
             {
                 seekTimer.Stop();
                 if (Visible) Hide();
-                idleTimer.Stop();
-                idleTimer.Start();
             }
 
             private bool EnsurePreviewEngine()
@@ -1208,7 +1250,7 @@ namespace LumaPlayer
                     MpvNative.mpv_set_option_string(previewMpv, "vo", "gpu");
                     MpvNative.mpv_set_option_string(previewMpv, "gpu-api", "d3d11");
                     MpvNative.mpv_set_option_string(previewMpv, "hr-seek", "yes");
-                    MpvNative.mpv_set_option_string(previewMpv, "hr-seek-framedrop", "no");
+                    MpvNative.mpv_set_option_string(previewMpv, "hr-seek-framedrop", "yes");
                     MpvNative.mpv_set_option_string(previewMpv, "osd-level", "0");
 
                     long windowId = previewSurface.Handle.ToInt64();
@@ -1237,7 +1279,7 @@ namespace LumaPlayer
                     seekAttempts++;
                     if (seekAttempts < 20 && Visible)
                     {
-                        seekTimer.Interval = 100;
+                        seekTimer.Interval = 25;
                         seekTimer.Start();
                     }
                     return;
@@ -1259,7 +1301,6 @@ namespace LumaPlayer
 
             protected override void OnFormClosed(FormClosedEventArgs e)
             {
-                idleTimer.Stop();
                 seekTimer.Stop();
                 DisposePreviewEngine();
                 base.OnFormClosed(e);
@@ -1599,6 +1640,14 @@ namespace LumaPlayer
                 Capture = false;
             }
 
+            protected override void OnMouseWheel(MouseEventArgs e)
+            {
+                base.OnMouseWheel(e);
+                HandledMouseEventArgs handled = e as HandledMouseEventArgs;
+                if (handled != null) handled.Handled = true;
+                Value += (e.Delta / 120.0) * 2.0;
+            }
+
             private void UpdateFromMouse(int x)
             {
                 double ratio = (x - 27.0) / Math.Max(12.0, Width - 75.0);
@@ -1609,8 +1658,8 @@ namespace LumaPlayer
 
         private sealed class SpeedSlider : Control
         {
-            private const double Minimum = 0.25;
-            private const double Maximum = 4.00;
+            private const double Minimum = -4.0;
+            private const double Maximum = 8.0;
             private double currentValue = 1.00;
             private bool dragging;
 
@@ -1630,7 +1679,7 @@ namespace LumaPlayer
                 get { return currentValue; }
                 set
                 {
-                    double adjusted = Math.Max(Minimum, Math.Min(Maximum, Math.Round(value * 20.0) / 20.0));
+                    double adjusted = Math.Max(Minimum, Math.Min(Maximum, Math.Round(value * 10.0) / 10.0));
                     if (Math.Abs(adjusted - currentValue) < 0.001) return;
                     currentValue = adjusted;
                     Invalidate();
@@ -1644,7 +1693,8 @@ namespace LumaPlayer
                 e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 e.Graphics.Clear(Color.White);
 
-                string label = currentValue.ToString("0.00", CultureInfo.InvariantCulture) + "×";
+                string label = (currentValue > 0.0 ? "+" : "")
+                    + currentValue.ToString("0.0", CultureInfo.InvariantCulture) + "×";
                 using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(58, 66, 81)))
                     e.Graphics.DrawString(label, Font, textBrush, new RectangleF(0, 8, 48, 20));
 
@@ -1653,6 +1703,7 @@ namespace LumaPlayer
                 float y = Height / 2f;
                 float ratio = (float)((currentValue - Minimum) / (Maximum - Minimum));
                 float knobX = left + (right - left) * ratio;
+                float zeroX = left + (right - left) * (float)((0.0 - Minimum) / (Maximum - Minimum));
 
                 using (Pen rail = new Pen(Color.FromArgb(221, 226, 234), 4f))
                 {
@@ -1660,11 +1711,21 @@ namespace LumaPlayer
                     rail.EndCap = LineCap.Round;
                     e.Graphics.DrawLine(rail, left, y, right, y);
                 }
+                using (Pen tick = new Pen(Color.FromArgb(160, 169, 184), 1f))
+                {
+                    for (int value = (int)Minimum; value <= (int)Maximum; value++)
+                    {
+                        float tickRatio = (float)((value - Minimum) / (Maximum - Minimum));
+                        float tickX = left + (right - left) * tickRatio;
+                        float halfHeight = value == 0 ? 4f : 2.5f;
+                        e.Graphics.DrawLine(tick, tickX, y - halfHeight, tickX, y + halfHeight);
+                    }
+                }
                 using (Pen fill = new Pen(Color.FromArgb(40, 113, 245), 4f))
                 {
                     fill.StartCap = LineCap.Round;
                     fill.EndCap = LineCap.Round;
-                    e.Graphics.DrawLine(fill, left, y, knobX, y);
+                    e.Graphics.DrawLine(fill, zeroX, y, knobX, y);
                 }
                 using (SolidBrush shadow = new SolidBrush(Color.FromArgb(36, 0, 0, 0)))
                     e.Graphics.FillEllipse(shadow, knobX - 7, y - 7, 14, 14);
@@ -1701,6 +1762,14 @@ namespace LumaPlayer
             {
                 base.OnMouseDoubleClick(e);
                 if (e.Button == MouseButtons.Left) Value = 1.00;
+            }
+
+            protected override void OnMouseWheel(MouseEventArgs e)
+            {
+                base.OnMouseWheel(e);
+                HandledMouseEventArgs handled = e as HandledMouseEventArgs;
+                if (handled != null) handled.Handled = true;
+                Value += (e.Delta / 120.0) * 0.1;
             }
 
             private void UpdateFromMouse(int x)
