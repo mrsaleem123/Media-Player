@@ -683,7 +683,11 @@ namespace LumaPlayer
         {
             if (key == Keys.Space) TogglePause();
             else if (key == Keys.F || key == Keys.F11) ToggleFullscreen();
-            else if (key == Keys.Escape && fullscreen) ToggleFullscreen();
+            else if (key == Keys.Escape)
+            {
+                if (fullscreen) ToggleFullscreen();
+                else Close();
+            }
             else if (key == Keys.Left && control) FrameStep(false);
             else if (key == Keys.Right && control) FrameStep(true);
             else if (key == Keys.Left) SeekRelative(-5.0);
