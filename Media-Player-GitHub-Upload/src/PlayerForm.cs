@@ -14,6 +14,7 @@ namespace LumaPlayer
     {
         private const int WM_LBUTTONDOWN = 0x0201;
         private const int WM_RBUTTONUP = 0x0205;
+        private const int WM_MOUSEMOVE = 0x0200;
         private const int WM_MOUSEWHEEL = 0x020A;
         private const int WM_KEYDOWN = 0x0100;
         private const int WM_SYSKEYDOWN = 0x0104;
@@ -38,24 +39,22 @@ namespace LumaPlayer
         private readonly System.Windows.Forms.Timer uiTimer = new System.Windows.Forms.Timer();
         private readonly ToolTip toolTip = new ToolTip();
 
-        private Panel infoBar;
         private Panel videoPanel;
         private Panel controlsPanel;
         private Label emptyLabel;
-        private Label titleLabel;
         private Label statusLabel;
         private Label timeLabel;
-        private Label volumeLabel;
         private TimelineBar timeline;
-        private Button openButton;
-        private Button previousButton;
-        private Button frameBackButton;
-        private Button playButton;
-        private Button frameForwardButton;
-        private Button nextButton;
-        private Button captureButton;
-        private Button recordButton;
+        private PlayerIconButton openButton;
+        private PlayerIconButton previousButton;
+        private PlayerIconButton frameBackButton;
+        private PlayerIconButton playButton;
+        private PlayerIconButton frameForwardButton;
+        private PlayerIconButton nextButton;
+        private PlayerIconButton captureButton;
+        private PlayerIconButton recordButton;
         private SpeedSlider speedSlider;
+        private VolumeSlider volumeSlider;
 
         private IntPtr mpv;
         private string currentFile;
@@ -69,6 +68,9 @@ namespace LumaPlayer
         private FormWindowState savedWindowState;
         private double currentVolume = 70.0;
         private int queueGeneration;
+        private DateTime fullscreenControlsHideAt;
+        private DateTime lastFullscreenRevealRequest;
+        private bool cursorHidden;
 
         private IntPtr mouseHook;
         private IntPtr keyboardHook;
@@ -88,7 +90,7 @@ namespace LumaPlayer
 
         private void ConfigureWindow()
         {
-            Text = "Luma Player " + Program.DisplayVersion;
+            Text = "Luma Player";
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(760, 500);
             ClientSize = new Size(1120, 700);
@@ -96,6 +98,7 @@ namespace LumaPlayer
             KeyPreview = true;
             AllowDrop = true;
             Font = new Font("Segoe UI", 9.5f, FontStyle.Regular, GraphicsUnit.Point);
+            LoadWindowIcon();
 
             DragEnter += OnDragEnter;
             DragDrop += OnDragDrop;
@@ -111,64 +114,11 @@ namespace LumaPlayer
         {
             SuspendLayout();
 
-            infoBar = new Panel();
-            infoBar.Dock = DockStyle.Top;
-            infoBar.Height = 44;
-            infoBar.BackColor = Color.White;
-            infoBar.Padding = new Padding(14, 6, 12, 6);
-
-            Panel brandMark = new Panel();
-            brandMark.Size = new Size(28, 28);
-            brandMark.Location = new Point(14, 8);
-            brandMark.BackColor = Color.FromArgb(40, 113, 245);
-            brandMark.Paint += delegate(object sender, PaintEventArgs e)
-            {
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                e.Graphics.Clear(Color.White);
-                using (SolidBrush brush = new SolidBrush(Color.FromArgb(40, 113, 245)))
-                    e.Graphics.FillEllipse(brush, 0, 0, 27, 27);
-                Point[] triangle = new Point[] { new Point(11, 7), new Point(11, 21), new Point(21, 14) };
-                using (SolidBrush brush = new SolidBrush(Color.White))
-                    e.Graphics.FillPolygon(brush, triangle);
-            };
-
-            titleLabel = new Label();
-            titleLabel.AutoEllipsis = true;
-            titleLabel.Text = "Luma Player " + Program.DisplayVersion;
-            titleLabel.Font = new Font("Segoe UI Semibold", 11.5f, FontStyle.Bold, GraphicsUnit.Point);
-            titleLabel.ForeColor = Color.FromArgb(25, 31, 42);
-            titleLabel.Location = new Point(52, 3);
-            titleLabel.Size = new Size(700, 21);
-
-            statusLabel = new Label();
-            statusLabel.AutoEllipsis = true;
-            statusLabel.Text = "Lightweight build " + Program.DisplayVersion + " • Ready";
-            statusLabel.ForeColor = Color.FromArgb(116, 124, 139);
-            statusLabel.Location = new Point(53, 23);
-            statusLabel.Size = new Size(700, 16);
-
-            openButton = CreateTextButton("Open media", 94);
-            openButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            openButton.Location = new Point(1008, 6);
-            openButton.Click += delegate { OpenVideoDialog(); };
-            toolTip.SetToolTip(openButton, "Open a video or audio file");
-
-            infoBar.Controls.Add(brandMark);
-            infoBar.Controls.Add(titleLabel);
-            infoBar.Controls.Add(statusLabel);
-            infoBar.Controls.Add(openButton);
-            infoBar.Resize += delegate
-            {
-                openButton.Left = infoBar.ClientSize.Width - openButton.Width - 16;
-                titleLabel.Width = Math.Max(160, openButton.Left - titleLabel.Left - 16);
-                statusLabel.Width = titleLabel.Width;
-            };
-
             controlsPanel = new Panel();
             controlsPanel.Dock = DockStyle.Bottom;
-            controlsPanel.Height = 84;
+            controlsPanel.Height = 94;
             controlsPanel.BackColor = Color.White;
-            controlsPanel.Padding = new Padding(12, 2, 12, 6);
+            controlsPanel.Padding = new Padding(12, 4, 12, 8);
             controlsPanel.Paint += delegate(object sender, PaintEventArgs e)
             {
                 using (Pen pen = new Pen(Color.FromArgb(235, 238, 243)))
@@ -177,35 +127,37 @@ namespace LumaPlayer
 
             timeline = new TimelineBar();
             timeline.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
-            timeline.Location = new Point(12, 2);
-            timeline.Height = 20;
+            timeline.Location = new Point(12, 4);
+            timeline.Height = 22;
             timeline.Width = 1088;
             timeline.SeekRequested += delegate(double seconds) { SeekAbsolute(seconds); };
-            timeline.NudgeRequested += delegate(double seconds) { SeekRelative(seconds); };
-            toolTip.SetToolTip(timeline, "Mouse wheel: 0.1 second forward/backward");
+            timeline.NudgeRequested += PauseAndNudgeTimeline;
+            toolTip.SetToolTip(timeline, "Mouse wheel: pause and move 0.1 second forward/backward");
 
             timeLabel = new Label();
             timeLabel.Text = "00:00.000  /  00:00.000";
             timeLabel.ForeColor = Color.FromArgb(94, 103, 120);
-            timeLabel.Location = new Point(16, 21);
+            timeLabel.Location = new Point(16, 27);
             timeLabel.Size = new Size(205, 18);
 
-            volumeLabel = new Label();
-            volumeLabel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            volumeLabel.TextAlign = ContentAlignment.MiddleRight;
-            volumeLabel.Text = "Volume 70%";
-            volumeLabel.ForeColor = Color.FromArgb(94, 103, 120);
-            volumeLabel.Location = new Point(980, 21);
-            volumeLabel.Size = new Size(120, 18);
+            statusLabel = new Label();
+            statusLabel.AutoEllipsis = true;
+            statusLabel.TextAlign = ContentAlignment.MiddleCenter;
+            statusLabel.Text = "Ready";
+            statusLabel.ForeColor = Color.FromArgb(116, 124, 139);
+            statusLabel.Location = new Point(360, 27);
+            statusLabel.Size = new Size(400, 18);
 
-            previousButton = CreateIconButton("|◀");
-            frameBackButton = CreateIconButton("◀|");
-            playButton = CreatePrimaryButton("▶");
-            frameForwardButton = CreateIconButton("|▶");
-            nextButton = CreateIconButton("▶|");
-            captureButton = CreateTextButton("Capture", 78);
-            recordButton = CreateTextButton("● Record", 84);
+            openButton = CreateIconButton(PlayerIcon.Open, false);
+            previousButton = CreateIconButton(PlayerIcon.Previous, false);
+            frameBackButton = CreateIconButton(PlayerIcon.FrameBack, false);
+            playButton = CreateIconButton(PlayerIcon.Play, true);
+            frameForwardButton = CreateIconButton(PlayerIcon.FrameForward, false);
+            nextButton = CreateIconButton(PlayerIcon.Next, false);
+            captureButton = CreateIconButton(PlayerIcon.Camera, false);
+            recordButton = CreateIconButton(PlayerIcon.Record, false);
 
+            openButton.Click += delegate { OpenVideoDialog(); };
             previousButton.Click += delegate { PlayAdjacent(-1); };
             frameBackButton.Click += delegate { FrameStep(false); };
             playButton.Click += delegate { TogglePause(); };
@@ -214,6 +166,7 @@ namespace LumaPlayer
             captureButton.Click += delegate { TakeScreenshot(); };
             recordButton.Click += delegate { ToggleRecording(); };
 
+            toolTip.SetToolTip(openButton, "Open a video or audio file");
             toolTip.SetToolTip(previousButton, "Previous media file in this folder");
             toolTip.SetToolTip(frameBackButton, "Previous frame");
             toolTip.SetToolTip(playButton, "Play / Pause");
@@ -223,14 +176,21 @@ namespace LumaPlayer
             toolTip.SetToolTip(recordButton, "Start / stop video recording");
 
             speedSlider = new SpeedSlider();
-            speedSlider.Size = new Size(158, 34);
+            speedSlider.Size = new Size(146, 36);
             speedSlider.Value = 1.0;
             speedSlider.ValueChanged += OnSpeedChanged;
             toolTip.SetToolTip(speedSlider, "Drag to change playback speed; double-click resets to 1.00x");
 
+            volumeSlider = new VolumeSlider();
+            volumeSlider.Size = new Size(170, 36);
+            volumeSlider.Value = 70.0;
+            volumeSlider.ValueChanged += OnVolumeChanged;
+            toolTip.SetToolTip(volumeSlider, "Volume 0–200%");
+
             controlsPanel.Controls.Add(timeline);
             controlsPanel.Controls.Add(timeLabel);
-            controlsPanel.Controls.Add(volumeLabel);
+            controlsPanel.Controls.Add(statusLabel);
+            controlsPanel.Controls.Add(openButton);
             controlsPanel.Controls.Add(previousButton);
             controlsPanel.Controls.Add(frameBackButton);
             controlsPanel.Controls.Add(playButton);
@@ -239,6 +199,7 @@ namespace LumaPlayer
             controlsPanel.Controls.Add(captureButton);
             controlsPanel.Controls.Add(recordButton);
             controlsPanel.Controls.Add(speedSlider);
+            controlsPanel.Controls.Add(volumeSlider);
 
             controlsPanel.Resize += LayoutBottomControls;
 
@@ -262,7 +223,6 @@ namespace LumaPlayer
 
             Controls.Add(videoPanel);
             Controls.Add(controlsPanel);
-            Controls.Add(infoBar);
 
             RegisterVolumeWheel(this);
             ResumeLayout(true);
@@ -272,6 +232,16 @@ namespace LumaPlayer
         {
             uiTimer.Interval = 200;
             uiTimer.Tick += OnUiTimer;
+        }
+
+        private void LoadWindowIcon()
+        {
+            string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LumaPlayer.ico");
+            try
+            {
+                if (File.Exists(iconPath)) Icon = new Icon(iconPath);
+            }
+            catch { }
         }
 
         private void OnShown(object sender, EventArgs e)
@@ -286,18 +256,20 @@ namespace LumaPlayer
         private void LayoutBottomControls(object sender, EventArgs e)
         {
             timeline.Width = Math.Max(200, controlsPanel.ClientSize.Width - 24);
-            volumeLabel.Left = controlsPanel.ClientSize.Width - volumeLabel.Width - 16;
+            statusLabel.Width = Math.Min(400, Math.Max(160, controlsPanel.ClientSize.Width - 450));
+            statusLabel.Left = (controlsPanel.ClientSize.Width - statusLabel.Width) / 2;
 
-            int gap = 6;
-            int total = previousButton.Width + frameBackButton.Width + playButton.Width + frameForwardButton.Width + nextButton.Width
-                + captureButton.Width + recordButton.Width + speedSlider.Width + gap * 7;
+            int gap = 8;
+            int total = openButton.Width + previousButton.Width + frameBackButton.Width + playButton.Width
+                + frameForwardButton.Width + nextButton.Width + captureButton.Width + recordButton.Width
+                + speedSlider.Width + volumeSlider.Width + gap * 9;
             int x = Math.Max(10, (controlsPanel.ClientSize.Width - total) / 2);
-            int y = 43;
+            int y = 49;
 
             Control[] ordered = new Control[]
             {
-                previousButton, frameBackButton, playButton, frameForwardButton, nextButton,
-                captureButton, recordButton, speedSlider
+                openButton, previousButton, frameBackButton, playButton, frameForwardButton, nextButton,
+                captureButton, recordButton, speedSlider, volumeSlider
             };
 
             for (int i = 0; i < ordered.Length; i++)
@@ -308,47 +280,11 @@ namespace LumaPlayer
             }
         }
 
-        private Button CreateIconButton(string text)
+        private PlayerIconButton CreateIconButton(PlayerIcon icon, bool primary)
         {
-            Button button = new Button();
-            button.Text = text;
-            button.Size = new Size(40, 32);
-            button.Font = new Font("Segoe UI Symbol", 10.5f, FontStyle.Bold, GraphicsUnit.Point);
-            StyleButton(button, false);
+            PlayerIconButton button = new PlayerIconButton(icon, primary);
+            button.Size = primary ? new Size(44, 40) : new Size(38, 36);
             return button;
-        }
-
-        private Button CreatePrimaryButton(string text)
-        {
-            Button button = new Button();
-            button.Text = text;
-            button.Size = new Size(42, 36);
-            button.Font = new Font("Segoe UI Symbol", 12f, FontStyle.Bold, GraphicsUnit.Point);
-            button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderSize = 0;
-            button.BackColor = Color.FromArgb(40, 113, 245);
-            button.ForeColor = Color.White;
-            button.Cursor = Cursors.Hand;
-            return button;
-        }
-
-        private Button CreateTextButton(string text, int width)
-        {
-            Button button = new Button();
-            button.Text = text;
-            button.Size = new Size(width, 32);
-            button.Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold, GraphicsUnit.Point);
-            StyleButton(button, false);
-            return button;
-        }
-
-        private void StyleButton(Button button, bool primary)
-        {
-            button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderSize = 0;
-            button.BackColor = primary ? Color.FromArgb(40, 113, 245) : Color.FromArgb(246, 248, 251);
-            button.ForeColor = primary ? Color.White : Color.FromArgb(35, 42, 55);
-            button.Cursor = Cursors.Hand;
         }
 
         private bool EnsureEngine()
@@ -386,6 +322,7 @@ namespace LumaPlayer
                 MpvNative.mpv_set_option_string(mpv, "demuxer-max-bytes", "32MiB");
                 MpvNative.mpv_set_option_string(mpv, "demuxer-max-back-bytes", "8MiB");
                 MpvNative.mpv_set_option_string(mpv, "sub-ass-override", "no");
+                MpvNative.mpv_set_option_string(mpv, "volume-max", "200");
                 MpvNative.mpv_set_option_string(mpv, "volume", "70");
                 MpvNative.mpv_set_option_string(mpv, "screenshot-format", "png");
 
@@ -426,9 +363,8 @@ namespace LumaPlayer
             timeline.Position = 0.0;
 
             MpvNative.Command(mpv, "loadfile", currentFile, "replace");
-            titleLabel.Text = Path.GetFileName(currentFile);
             statusLabel.Text = "Loading with hardware acceleration…";
-            Text = Path.GetFileName(currentFile) + " — Luma Player " + Program.DisplayVersion;
+            Text = Path.GetFileName(currentFile);
             BuildFolderQueueAsync(currentFile, generation);
         }
 
@@ -543,16 +479,32 @@ namespace LumaPlayer
             MpvNative.Command(mpv, "seek", seconds.ToString("0.000", CultureInfo.InvariantCulture), "relative+exact");
         }
 
+        private void PauseAndNudgeTimeline(double seconds)
+        {
+            if (mpv == IntPtr.Zero || Math.Abs(seconds) < 0.0001) return;
+            MpvNative.Command(mpv, "set", "pause", "yes");
+            SeekRelative(seconds);
+        }
+
         private void AdjustVolume(double delta)
         {
             if (mpv == IntPtr.Zero) return;
-            MpvNative.Command(mpv, "add", "volume", delta.ToString("0.0", CultureInfo.InvariantCulture));
+            currentVolume = Math.Max(0.0, Math.Min(200.0, currentVolume + delta));
+            volumeSlider.SetValueFromPlayer(currentVolume);
+            MpvNative.Command(mpv, "set", "volume", currentVolume.ToString("0.0", CultureInfo.InvariantCulture));
         }
 
         private void OnSpeedChanged(object sender, EventArgs e)
         {
             if (mpv == IntPtr.Zero) return;
             MpvNative.Command(mpv, "set", "speed", speedSlider.Value.ToString("0.00", CultureInfo.InvariantCulture));
+        }
+
+        private void OnVolumeChanged(object sender, EventArgs e)
+        {
+            currentVolume = volumeSlider.Value;
+            if (mpv == IntPtr.Zero) return;
+            MpvNative.Command(mpv, "set", "volume", currentVolume.ToString("0.0", CultureInfo.InvariantCulture));
         }
 
         private void TakeScreenshot()
@@ -587,9 +539,8 @@ namespace LumaPlayer
             if (result >= 0)
             {
                 recording = true;
-                recordButton.Text = "■  Stop";
-                recordButton.BackColor = Color.FromArgb(255, 235, 237);
-                recordButton.ForeColor = Color.FromArgb(207, 45, 62);
+                recordButton.IconKind = PlayerIcon.Stop;
+                recordButton.Active = true;
                 statusLabel.Text = "Recording… seeking will safely finish this recording";
             }
             else
@@ -603,14 +554,15 @@ namespace LumaPlayer
             if (!recording || mpv == IntPtr.Zero) return;
             MpvNative.Command(mpv, "set", "stream-record", "");
             recording = false;
-            recordButton.Text = "●  Record";
-            recordButton.BackColor = Color.FromArgb(246, 248, 251);
-            recordButton.ForeColor = Color.FromArgb(35, 42, 55);
+            recordButton.IconKind = PlayerIcon.Record;
+            recordButton.Active = false;
             if (notify) ShowStatus("Recording saved in Videos\\Luma Player\\Recordings", 4.0);
         }
 
         private void OnUiTimer(object sender, EventArgs e)
         {
+            if (fullscreen && controlsPanel.Visible && DateTime.UtcNow >= fullscreenControlsHideAt)
+                HideFullscreenControls();
             if (mpv == IntPtr.Zero) return;
 
             double duration;
@@ -629,12 +581,12 @@ namespace LumaPlayer
 
             if (MpvNative.mpv_get_property_double(mpv, "volume", MpvNative.MPV_FORMAT_DOUBLE, out volume) >= 0)
             {
-                currentVolume = volume;
-                volumeLabel.Text = "Volume " + Math.Round(volume).ToString(CultureInfo.InvariantCulture) + "%";
+                currentVolume = Math.Max(0.0, Math.Min(200.0, volume));
+                volumeSlider.SetValueFromPlayer(currentVolume);
             }
 
             if (MpvNative.mpv_get_property_flag(mpv, "pause", MpvNative.MPV_FORMAT_FLAG, out paused) >= 0)
-                playButton.Text = paused != 0 ? "▶" : "Ⅱ";
+                playButton.IconKind = paused != 0 ? PlayerIcon.Play : PlayerIcon.Pause;
 
             timeLabel.Text = FormatTime(position) + "  /  " + FormatTime(duration);
             if (!recording && !String.IsNullOrEmpty(currentFile) && DateTime.UtcNow >= transientStatusUntil)
@@ -757,21 +709,57 @@ namespace LumaPlayer
                 FormBorderStyle = FormBorderStyle.None;
                 Bounds = Screen.FromControl(this).Bounds;
                 TopMost = true;
-                infoBar.Visible = false;
+                controlsPanel.Dock = DockStyle.None;
+                controlsPanel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+                controlsPanel.Bounds = new Rectangle(0, ClientSize.Height - controlsPanel.Height, ClientSize.Width, controlsPanel.Height);
                 controlsPanel.Visible = false;
                 fullscreen = true;
+                HideCursorOnce();
             }
             else
             {
+                ShowCursorOnce();
                 TopMost = false;
                 FormBorderStyle = savedBorderStyle;
                 WindowState = FormWindowState.Normal;
                 Bounds = savedBounds;
                 WindowState = savedWindowState;
-                infoBar.Visible = true;
+                controlsPanel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+                controlsPanel.Dock = DockStyle.Bottom;
                 controlsPanel.Visible = true;
                 fullscreen = false;
             }
+        }
+
+        private void ShowFullscreenControls()
+        {
+            if (!fullscreen) return;
+            controlsPanel.Bounds = new Rectangle(0, ClientSize.Height - controlsPanel.Height, ClientSize.Width, controlsPanel.Height);
+            controlsPanel.Visible = true;
+            controlsPanel.BringToFront();
+            fullscreenControlsHideAt = DateTime.UtcNow.AddSeconds(2.5);
+            ShowCursorOnce();
+        }
+
+        private void HideFullscreenControls()
+        {
+            if (!fullscreen) return;
+            controlsPanel.Visible = false;
+            HideCursorOnce();
+        }
+
+        private void HideCursorOnce()
+        {
+            if (cursorHidden) return;
+            Cursor.Hide();
+            cursorHidden = true;
+        }
+
+        private void ShowCursorOnce()
+        {
+            if (!cursorHidden) return;
+            Cursor.Show();
+            cursorHidden = false;
         }
 
         private void HandleVideoLeftClick()
@@ -861,11 +849,30 @@ namespace LumaPlayer
                 NativeMethods.MouseHookData data = (NativeMethods.MouseHookData)Marshal.PtrToStructure(
                     lParam, typeof(NativeMethods.MouseHookData));
                 Point pointer = new Point(data.point.x, data.point.y);
+                int message = wParam.ToInt32();
+
+                if (fullscreen && message == WM_MOUSEMOVE)
+                {
+                    DateTime now = DateTime.UtcNow;
+                    if ((now - lastFullscreenRevealRequest).TotalMilliseconds >= 100.0)
+                    {
+                        lastFullscreenRevealRequest = now;
+                        try { BeginInvoke(new Action(ShowFullscreenControls)); }
+                        catch { }
+                    }
+                }
+
+                if (fullscreen && controlsPanel.Visible)
+                {
+                    Rectangle controlsBounds = controlsPanel.RectangleToScreen(controlsPanel.ClientRectangle);
+                    if (controlsBounds.Contains(pointer))
+                        return NativeMethods.CallNextHookEx(mouseHook, code, wParam, lParam);
+                }
+
                 Rectangle videoBounds = videoPanel.RectangleToScreen(videoPanel.ClientRectangle);
 
                 if (videoBounds.Contains(pointer))
                 {
-                    int message = wParam.ToInt32();
                     if (message == WM_LBUTTONDOWN)
                     {
                         BeginInvoke(new Action(HandleVideoLeftClick));
@@ -922,6 +929,7 @@ namespace LumaPlayer
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            ShowCursorOnce();
             uiTimer.Stop();
             StopRecording(false);
             RemoveInputHooks();
@@ -1003,6 +1011,347 @@ namespace LumaPlayer
 
             [DllImport("dwmapi.dll")]
             internal static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+        }
+
+        private enum PlayerIcon
+        {
+            Open,
+            Previous,
+            FrameBack,
+            Play,
+            Pause,
+            FrameForward,
+            Next,
+            Camera,
+            Record,
+            Stop
+        }
+
+        private sealed class PlayerIconButton : Control
+        {
+            private PlayerIcon iconKind;
+            private readonly bool primary;
+            private bool hovered;
+            private bool pressed;
+            private bool active;
+
+            internal PlayerIconButton(PlayerIcon icon, bool isPrimary)
+            {
+                iconKind = icon;
+                primary = isPrimary;
+                Cursor = Cursors.Hand;
+                TabStop = true;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
+                    | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
+                    | ControlStyles.Selectable, true);
+            }
+
+            internal PlayerIcon IconKind
+            {
+                get { return iconKind; }
+                set
+                {
+                    if (iconKind == value) return;
+                    iconKind = value;
+                    Invalidate();
+                }
+            }
+
+            internal bool Active
+            {
+                get { return active; }
+                set
+                {
+                    if (active == value) return;
+                    active = value;
+                    Invalidate();
+                }
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                base.OnMouseEnter(e);
+                hovered = true;
+                Invalidate();
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                base.OnMouseLeave(e);
+                hovered = false;
+                pressed = false;
+                Invalidate();
+            }
+
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                base.OnMouseDown(e);
+                if (e.Button != MouseButtons.Left) return;
+                pressed = true;
+                Focus();
+                Invalidate();
+            }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                base.OnMouseUp(e);
+                if (e.Button != MouseButtons.Left) return;
+                pressed = false;
+                Invalidate();
+            }
+
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                base.OnKeyDown(e);
+                if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space)
+                {
+                    OnClick(EventArgs.Empty);
+                    e.Handled = true;
+                }
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Color background;
+                Color iconColor;
+
+                if (active)
+                {
+                    background = pressed ? Color.FromArgb(252, 214, 218) : Color.FromArgb(255, 232, 235);
+                    iconColor = Color.FromArgb(209, 45, 63);
+                }
+                else if (primary)
+                {
+                    background = pressed ? Color.FromArgb(24, 91, 213)
+                        : hovered ? Color.FromArgb(53, 126, 248) : Color.FromArgb(40, 113, 245);
+                    iconColor = Color.White;
+                }
+                else
+                {
+                    background = pressed ? Color.FromArgb(226, 233, 243)
+                        : hovered ? Color.FromArgb(237, 242, 249) : Color.FromArgb(246, 248, 251);
+                    iconColor = Color.FromArgb(48, 58, 73);
+                }
+
+                RectangleF body = new RectangleF(0.5f, 0.5f, Math.Max(1f, Width - 1f), Math.Max(1f, Height - 1f));
+                using (GraphicsPath path = RoundedRectangle(body, 9f))
+                using (SolidBrush brush = new SolidBrush(background))
+                    e.Graphics.FillPath(brush, path);
+
+                DrawIcon(e.Graphics, iconColor);
+
+                if (Focused && ShowFocusCues)
+                {
+                    Rectangle focus = ClientRectangle;
+                    focus.Inflate(-3, -3);
+                    ControlPaint.DrawFocusRectangle(e.Graphics, focus);
+                }
+            }
+
+            private void DrawIcon(Graphics graphics, Color color)
+            {
+                float cx = Width / 2f;
+                float cy = Height / 2f;
+                using (Pen pen = new Pen(color, 2f))
+                using (SolidBrush brush = new SolidBrush(color))
+                {
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+
+                    if (iconKind == PlayerIcon.Play)
+                    {
+                        graphics.FillPolygon(brush, new PointF[]
+                        {
+                            new PointF(cx - 5f, cy - 8f), new PointF(cx - 5f, cy + 8f), new PointF(cx + 8f, cy)
+                        });
+                    }
+                    else if (iconKind == PlayerIcon.Pause)
+                    {
+                        graphics.FillRectangle(brush, cx - 7f, cy - 8f, 4f, 16f);
+                        graphics.FillRectangle(brush, cx + 3f, cy - 8f, 4f, 16f);
+                    }
+                    else if (iconKind == PlayerIcon.Previous || iconKind == PlayerIcon.Next
+                        || iconKind == PlayerIcon.FrameBack || iconKind == PlayerIcon.FrameForward)
+                    {
+                        bool pointsRight = iconKind == PlayerIcon.Next || iconKind == PlayerIcon.FrameForward;
+                        bool barOnRight = iconKind == PlayerIcon.FrameBack || iconKind == PlayerIcon.Next;
+                        float triangleCenter = barOnRight ? cx - 2f : cx + 2f;
+                        PointF[] triangle = pointsRight
+                            ? new PointF[] { new PointF(triangleCenter - 6f, cy - 7f), new PointF(triangleCenter - 6f, cy + 7f), new PointF(triangleCenter + 6f, cy) }
+                            : new PointF[] { new PointF(triangleCenter + 6f, cy - 7f), new PointF(triangleCenter + 6f, cy + 7f), new PointF(triangleCenter - 6f, cy) };
+                        graphics.FillPolygon(brush, triangle);
+                        float barX = barOnRight ? cx + 8f : cx - 8f;
+                        graphics.DrawLine(pen, barX, cy - 7f, barX, cy + 7f);
+                    }
+                    else if (iconKind == PlayerIcon.Camera)
+                    {
+                        graphics.DrawRectangle(pen, cx - 9f, cy - 6f, 18f, 13f);
+                        graphics.DrawLine(pen, cx - 5f, cy - 6f, cx - 2f, cy - 9f);
+                        graphics.DrawLine(pen, cx - 2f, cy - 9f, cx + 3f, cy - 9f);
+                        graphics.DrawLine(pen, cx + 3f, cy - 9f, cx + 5f, cy - 6f);
+                        graphics.DrawEllipse(pen, cx - 4f, cy - 4f, 8f, 8f);
+                    }
+                    else if (iconKind == PlayerIcon.Record)
+                    {
+                        using (SolidBrush red = new SolidBrush(Color.FromArgb(224, 55, 72)))
+                            graphics.FillEllipse(red, cx - 7f, cy - 7f, 14f, 14f);
+                    }
+                    else if (iconKind == PlayerIcon.Stop)
+                    {
+                        using (SolidBrush red = new SolidBrush(Color.FromArgb(209, 45, 63)))
+                            graphics.FillRectangle(red, cx - 6f, cy - 6f, 12f, 12f);
+                    }
+                    else if (iconKind == PlayerIcon.Open)
+                    {
+                        using (GraphicsPath folder = new GraphicsPath())
+                        {
+                            folder.AddLine(cx - 9f, cy - 6f, cx - 2f, cy - 6f);
+                            folder.AddLine(cx - 2f, cy - 6f, cx + 1f, cy - 3f);
+                            folder.AddLine(cx + 1f, cy - 3f, cx + 9f, cy - 3f);
+                            folder.AddLine(cx + 9f, cy - 3f, cx + 8f, cy + 7f);
+                            folder.AddLine(cx + 8f, cy + 7f, cx - 9f, cy + 7f);
+                            folder.CloseFigure();
+                            graphics.DrawPath(pen, folder);
+                        }
+                    }
+                }
+            }
+
+            private static GraphicsPath RoundedRectangle(RectangleF rectangle, float radius)
+            {
+                GraphicsPath path = new GraphicsPath();
+                float diameter = radius * 2f;
+                path.AddArc(rectangle.X, rectangle.Y, diameter, diameter, 180, 90);
+                path.AddArc(rectangle.Right - diameter, rectangle.Y, diameter, diameter, 270, 90);
+                path.AddArc(rectangle.Right - diameter, rectangle.Bottom - diameter, diameter, diameter, 0, 90);
+                path.AddArc(rectangle.X, rectangle.Bottom - diameter, diameter, diameter, 90, 90);
+                path.CloseFigure();
+                return path;
+            }
+        }
+
+        private sealed class VolumeSlider : Control
+        {
+            private double currentValue = 70.0;
+            private bool dragging;
+
+            internal event EventHandler ValueChanged;
+
+            internal VolumeSlider()
+            {
+                DoubleBuffered = true;
+                Cursor = Cursors.Hand;
+                BackColor = Color.White;
+                Font = new Font("Segoe UI Semibold", 8.5f, FontStyle.Bold, GraphicsUnit.Point);
+                SetStyle(ControlStyles.Selectable, true);
+            }
+
+            internal double Value
+            {
+                get { return currentValue; }
+                set { SetValue(value, true); }
+            }
+
+            internal void SetValueFromPlayer(double value)
+            {
+                SetValue(value, false);
+            }
+
+            private void SetValue(double value, bool notify)
+            {
+                double adjusted = Math.Max(0.0, Math.Min(200.0, Math.Round(value)));
+                if (Math.Abs(adjusted - currentValue) < 0.001) return;
+                currentValue = adjusted;
+                Invalidate();
+                if (notify && ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.Clear(Color.White);
+
+                float cy = Height / 2f;
+                Color iconColor = Color.FromArgb(70, 80, 96);
+                using (Pen iconPen = new Pen(iconColor, 1.7f))
+                using (SolidBrush iconBrush = new SolidBrush(iconColor))
+                {
+                    iconPen.StartCap = LineCap.Round;
+                    iconPen.EndCap = LineCap.Round;
+                    e.Graphics.FillPolygon(iconBrush, new PointF[]
+                    {
+                        new PointF(2f, cy - 3f), new PointF(7f, cy - 3f), new PointF(12f, cy - 8f),
+                        new PointF(12f, cy + 8f), new PointF(7f, cy + 3f), new PointF(2f, cy + 3f)
+                    });
+                    e.Graphics.DrawArc(iconPen, 10f, cy - 7f, 10f, 14f, -55f, 110f);
+                }
+
+                float left = 27f;
+                float right = Math.Max(left + 12f, Width - 48f);
+                float ratio = (float)(currentValue / 200.0);
+                float knobX = left + (right - left) * ratio;
+
+                using (Pen rail = new Pen(Color.FromArgb(221, 226, 234), 4f))
+                {
+                    rail.StartCap = LineCap.Round;
+                    rail.EndCap = LineCap.Round;
+                    e.Graphics.DrawLine(rail, left, cy, right, cy);
+                }
+                using (Pen fill = new Pen(Color.FromArgb(40, 113, 245), 4f))
+                {
+                    fill.StartCap = LineCap.Round;
+                    fill.EndCap = LineCap.Round;
+                    e.Graphics.DrawLine(fill, left, cy, knobX, cy);
+                }
+                using (SolidBrush knob = new SolidBrush(Color.White))
+                    e.Graphics.FillEllipse(knob, knobX - 5f, cy - 5f, 10f, 10f);
+                using (Pen outline = new Pen(Color.FromArgb(40, 113, 245), 2f))
+                    e.Graphics.DrawEllipse(outline, knobX - 5f, cy - 5f, 10f, 10f);
+
+                string label = Math.Round(currentValue).ToString(CultureInfo.InvariantCulture) + "%";
+                using (SolidBrush textBrush = new SolidBrush(Color.FromArgb(58, 66, 81)))
+                {
+                    StringFormat format = new StringFormat();
+                    format.Alignment = StringAlignment.Far;
+                    format.LineAlignment = StringAlignment.Center;
+                    e.Graphics.DrawString(label, Font, textBrush, new RectangleF(Width - 45f, 0f, 43f, Height), format);
+                    format.Dispose();
+                }
+            }
+
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                base.OnMouseDown(e);
+                if (e.Button != MouseButtons.Left) return;
+                dragging = true;
+                Capture = true;
+                UpdateFromMouse(e.X);
+            }
+
+            protected override void OnMouseMove(MouseEventArgs e)
+            {
+                base.OnMouseMove(e);
+                if (dragging) UpdateFromMouse(e.X);
+            }
+
+            protected override void OnMouseUp(MouseEventArgs e)
+            {
+                base.OnMouseUp(e);
+                if (e.Button != MouseButtons.Left) return;
+                dragging = false;
+                Capture = false;
+            }
+
+            private void UpdateFromMouse(int x)
+            {
+                double ratio = (x - 27.0) / Math.Max(12.0, Width - 75.0);
+                ratio = Math.Max(0.0, Math.Min(1.0, ratio));
+                Value = ratio * 200.0;
+            }
         }
 
         private sealed class SpeedSlider : Control
