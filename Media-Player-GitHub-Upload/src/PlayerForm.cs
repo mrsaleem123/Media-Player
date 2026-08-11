@@ -323,12 +323,11 @@ namespace LumaPlayer
                 MpvNative.mpv_set_option_string(mpv, "gpu-api", "d3d11");
                 MpvNative.mpv_set_option_string(mpv, "keep-open", "yes");
                 MpvNative.mpv_set_option_string(mpv, "autoload-files", "no");
-                MpvNative.mpv_set_option_string(mpv, "cache", "yes");
-                MpvNative.mpv_set_option_string(mpv, "demuxer-max-bytes", "128MiB");
-                MpvNative.mpv_set_option_string(mpv, "demuxer-max-back-bytes", "64MiB");
+                MpvNative.mpv_set_option_string(mpv, "cache", "no");
+                MpvNative.mpv_set_option_string(mpv, "demuxer-max-bytes", "32MiB");
+                MpvNative.mpv_set_option_string(mpv, "demuxer-max-back-bytes", "8MiB");
                 MpvNative.mpv_set_option_string(mpv, "video-reversal-buffer", "128MiB");
                 MpvNative.mpv_set_option_string(mpv, "audio-reversal-buffer", "8MiB");
-                MpvNative.mpv_set_option_string(mpv, "vd-queue-enable", "yes");
                 MpvNative.mpv_set_option_string(mpv, "sub-ass-override", "no");
                 MpvNative.mpv_set_option_string(mpv, "volume-max", "200");
                 MpvNative.mpv_set_option_string(mpv, "volume", "70");
@@ -362,6 +361,7 @@ namespace LumaPlayer
             if (!EnsureEngine()) return;
 
             StopRecording(false);
+            HideTimelinePreview();
             currentFile = Path.GetFullPath(path);
             int generation = ++queueGeneration;
             folderFiles.Clear();
@@ -371,7 +371,10 @@ namespace LumaPlayer
             timeline.Position = 0.0;
 
             MpvNative.Command(mpv, "loadfile", currentFile, "replace");
-            PrepareTimelinePreview(currentFile);
+            if (Math.Abs(speedSlider.Value) < 0.001)
+                speedSlider.Value = 1.0;
+            MpvNative.Command(mpv, "seek", "0.000", "absolute+exact");
+            MpvNative.Command(mpv, "set", "pause", "no");
             statusLabel.Text = "Loading with hardware acceleration…";
             Text = Path.GetFileName(currentFile);
             BuildFolderQueueAsync(currentFile, generation);
@@ -521,18 +524,6 @@ namespace LumaPlayer
             timelinePreview.ShowPreview(this, currentFile, seconds, anchor);
         }
 
-        private void PrepareTimelinePreview(string file)
-        {
-            if (String.IsNullOrEmpty(file) || IsAudioFile(file))
-            {
-                HideTimelinePreview();
-                return;
-            }
-            if (timelinePreview == null || timelinePreview.IsDisposed)
-                timelinePreview = new TimelinePreviewForm();
-            timelinePreview.Prepare(file);
-        }
-
         private void HideTimelinePreview()
         {
             if (timelinePreview != null && !timelinePreview.IsDisposed)
@@ -566,8 +557,24 @@ namespace LumaPlayer
             if (reverse != reversePlayback)
             {
                 reversePlayback = reverse;
-                MpvNative.Command(mpv, "set", "play-direction", reverse ? "backward" : "forward");
-                MpvNative.Command(mpv, "set", "hwdec", reverse ? "no" : "auto");
+                if (reverse)
+                {
+                    MpvNative.Command(mpv, "set", "cache", "yes");
+                    MpvNative.Command(mpv, "set", "demuxer-max-bytes", "128MiB");
+                    MpvNative.Command(mpv, "set", "demuxer-max-back-bytes", "64MiB");
+                    MpvNative.Command(mpv, "set", "vd-queue-enable", "yes");
+                    MpvNative.Command(mpv, "set", "hwdec", "no");
+                    MpvNative.Command(mpv, "set", "play-direction", "backward");
+                }
+                else
+                {
+                    MpvNative.Command(mpv, "set", "play-direction", "forward");
+                    MpvNative.Command(mpv, "set", "vd-queue-enable", "no");
+                    MpvNative.Command(mpv, "set", "cache", "no");
+                    MpvNative.Command(mpv, "set", "demuxer-max-bytes", "32MiB");
+                    MpvNative.Command(mpv, "set", "demuxer-max-back-bytes", "8MiB");
+                    MpvNative.Command(mpv, "set", "hwdec", "auto");
+                }
             }
             MpvNative.Command(mpv, "set", "speed", Math.Abs(requested).ToString("0.0", CultureInfo.InvariantCulture));
             MpvNative.Command(mpv, "set", "pause", "no");
@@ -1138,6 +1145,7 @@ namespace LumaPlayer
             private readonly Panel previewSurface;
             private readonly Label previewTime;
             private readonly System.Windows.Forms.Timer seekTimer;
+            private readonly System.Windows.Forms.Timer idleTimer;
             private IntPtr previewMpv;
             private string loadedFile;
             private double pendingSeconds;
@@ -1171,6 +1179,17 @@ namespace LumaPlayer
                 seekTimer = new System.Windows.Forms.Timer();
                 seekTimer.Interval = 12;
                 seekTimer.Tick += ApplyPendingSeek;
+
+                idleTimer = new System.Windows.Forms.Timer();
+                idleTimer.Interval = 1500;
+                idleTimer.Tick += delegate
+                {
+                    idleTimer.Stop();
+                    seekTimer.Stop();
+                    if (previewMpv != IntPtr.Zero)
+                        MpvNative.Command(previewMpv, "stop");
+                    loadedFile = null;
+                };
             }
 
             protected override bool ShowWithoutActivation
@@ -1205,6 +1224,7 @@ namespace LumaPlayer
 
                 if (!Visible) Show(owner);
                 BringToFront();
+                idleTimer.Stop();
 
                 bool changed = Prepare(file);
                 seekTimer.Interval = changed ? 25 : 12;
@@ -1228,6 +1248,8 @@ namespace LumaPlayer
             {
                 seekTimer.Stop();
                 if (Visible) Hide();
+                idleTimer.Stop();
+                idleTimer.Start();
             }
 
             private bool EnsurePreviewEngine()
@@ -1246,9 +1268,12 @@ namespace LumaPlayer
                     MpvNative.mpv_set_option_string(previewMpv, "pause", "yes");
                     MpvNative.mpv_set_option_string(previewMpv, "idle", "yes");
                     MpvNative.mpv_set_option_string(previewMpv, "keep-open", "yes");
-                    MpvNative.mpv_set_option_string(previewMpv, "hwdec", "auto-safe");
+                    MpvNative.mpv_set_option_string(previewMpv, "hwdec", "auto-copy-safe");
                     MpvNative.mpv_set_option_string(previewMpv, "vo", "gpu");
                     MpvNative.mpv_set_option_string(previewMpv, "gpu-api", "d3d11");
+                    MpvNative.mpv_set_option_string(previewMpv, "cache", "no");
+                    MpvNative.mpv_set_option_string(previewMpv, "demuxer-max-bytes", "16MiB");
+                    MpvNative.mpv_set_option_string(previewMpv, "demuxer-max-back-bytes", "4MiB");
                     MpvNative.mpv_set_option_string(previewMpv, "hr-seek", "yes");
                     MpvNative.mpv_set_option_string(previewMpv, "hr-seek-framedrop", "yes");
                     MpvNative.mpv_set_option_string(previewMpv, "osd-level", "0");
@@ -1301,6 +1326,7 @@ namespace LumaPlayer
 
             protected override void OnFormClosed(FormClosedEventArgs e)
             {
+                idleTimer.Stop();
                 seekTimer.Stop();
                 DisposePreviewEngine();
                 base.OnFormClosed(e);
