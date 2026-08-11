@@ -35,7 +35,7 @@ namespace LumaPlayer
 
         private readonly string initialFile;
         private readonly List<string> folderFiles = new List<string>();
-        private readonly Timer uiTimer = new Timer();
+        private readonly System.Windows.Forms.Forms.Timer uiTimer = new System.Windows.Forms.Timer();
         private readonly ToolTip toolTip = new ToolTip();
 
         private Panel infoBar;
